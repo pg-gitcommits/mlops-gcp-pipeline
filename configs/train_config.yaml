@@ -37,7 +37,7 @@ data:
     - truck
   val_split: 0.2
   num_workers: 2
-  image_size: 224
+  image_size: 32
 
 # Augmentation
 augmentation:

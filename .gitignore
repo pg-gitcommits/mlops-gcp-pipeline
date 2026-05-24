@@ -31,5 +31,4 @@ wandb/
 # OS
 .DS_Store
 
-mlflow.db
 mlflow-artifacts/
