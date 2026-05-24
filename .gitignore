@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+
+# Secrets and credentials
+*.json
+*.env
+.env.*
+*service_account*
+*credentials*
+
+# ML artifacts
+*.pt
+*.pth
+*.ckpt
+data/
+logs/
+mlruns/
+wandb/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store

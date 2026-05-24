@@ -1,0 +1,55 @@
+# Model
+model:
+  architecture: resnet18
+  num_classes: 10
+  pretrained: true
+
+# Training
+training:
+  epochs: 6
+  random_seed: 42
+
+# Grid Search
+grid_search:
+  learning_rate:
+    - 0.01
+    - 0.001
+  batch_size:
+    - 64
+  momentum:
+    - 0.9
+  weight_decay:
+    - 0.0001
+
+# Data
+data:
+  dataset: cifar10
+  classes:
+    - airplane
+    - automobile
+    - bird
+    - cat
+    - deer
+    - dog
+    - frog
+    - horse
+    - ship
+    - truck
+  val_split: 0.2
+  num_workers: 2
+  image_size: 224
+
+# Augmentation
+augmentation:
+  random_horizontal_flip: true
+  random_rotation: 15
+  color_jitter: true
+
+# Paths
+paths:
+  checkpoint_dir: checkpoints/
+  log_dir: logs/
+
+# GCP
+gcp:
+  project_id: validation-469814
