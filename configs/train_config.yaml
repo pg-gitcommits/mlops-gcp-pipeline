@@ -6,7 +6,7 @@ model:
 
 # Training
 training:
-  epochs: 6
+  epochs: 20
   random_seed: 42
 
 # Grid Search
