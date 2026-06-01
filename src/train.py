@@ -1,4 +1,5 @@
 import os
+import glob
 import yaml
 import argparse
 import torch
@@ -30,15 +31,23 @@ def parse_args():
     return parser.parse_args()
 
 
-def experiment_already_done(checkpoint_dir, checkpoint_name):
-    """Skip experiment if checkpoint already exists."""
-    import glob
-    pattern = os.path.join(checkpoint_dir, f"{checkpoint_name}_ep*_*.pt")
-    existing = glob.glob(pattern)
-    if existing:
-        print(f"Skipping {checkpoint_name} — already completed: {existing[0]}")
-        return True
-    return False
+def experiment_already_done(experiment_name, run_name):
+    """Check MLflow for a completed run with these hyperparameters."""
+    try:
+        client = mlflow.tracking.MlflowClient('http://localhost:5000')
+        experiment = client.get_experiment_by_name(experiment_name)
+        if experiment is None:
+            return False
+        runs = client.search_runs(
+            experiment_ids=[experiment.experiment_id],
+            filter_string=f"tags.`mlflow.runName` = '{run_name}' and status = 'FINISHED'"
+        )
+        if runs:
+            print(f"Skipping {run_name} — completed run found in MLflow.")
+            return True
+        return False
+    except Exception:
+        return False
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
@@ -77,7 +86,8 @@ def validate(model, loader, criterion, device):
     return running_loss / len(loader), 100. * correct / total
 
 
-def run_experiment(config, architecture, lr, batch_size, momentum, weight_decay):
+def run_experiment(config, architecture, lr, batch_size, momentum,
+                   weight_decay, experiment_name):
     device = get_device()
     config['training']['batch_size'] = batch_size
 
@@ -92,27 +102,48 @@ def run_experiment(config, architecture, lr, batch_size, momentum, weight_decay)
     train_loader, val_loader = get_dataloaders(config)
 
     # Loss and optimiser
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(
-        model.parameters(),
-        lr=lr,
-        momentum=momentum,
-        weight_decay=weight_decay
-    )
+    optimizer_name = config['training'].get('optimizer', 'sgd').lower()
+    if optimizer_name == 'sgd':
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=lr,
+            momentum=momentum,
+            weight_decay=weight_decay
+        )
+    elif optimizer_name == 'adam':
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=lr,
+            weight_decay=weight_decay
+        )
+    else:
+        raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+
+    # Scheduler
+    step_size = config['training'].get('scheduler_step_size', 7)
+    gamma = config['training'].get('scheduler_gamma', 0.1)
     scheduler = optim.lr_scheduler.StepLR(
-        optimizer, step_size=2, gamma=0.1
+        optimizer, step_size=step_size, gamma=gamma
     )
 
+    # Run name — hyperparameters only, val_acc added after training
     run_name = (f"{architecture}_lr{lr}_bs{batch_size}_"
                 f"mom{momentum}_wd{weight_decay}")
 
+    timestamp = datetime.now().strftime('%Y%m%d')
     epochs = config['training']['epochs']
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-    checkpoint_filename = f"{run_name}_ep{epochs}_{timestamp}"
 
     print(f"\nExperiment: {run_name}")
 
-    with mlflow.start_run(run_name=run_name):
+    # Temporary checkpoint path — renamed after training
+    os.makedirs(config['paths']['checkpoint_dir'], exist_ok=True)
+    temp_checkpoint_path = os.path.join(
+        config['paths']['checkpoint_dir'],
+        f"temp_{run_name}.pt"
+    )
+
+    with mlflow.start_run(run_name=run_name) as run:
+        # Log hyperparameters
         mlflow.log_params({
             'architecture': architecture,
             'learning_rate': lr,
@@ -121,12 +152,15 @@ def run_experiment(config, architecture, lr, batch_size, momentum, weight_decay)
             'weight_decay': weight_decay,
             'epochs': epochs,
             'pretrained': config['model']['pretrained'],
-            'timestamp': timestamp
+            'optimizer': optimizer_name,
+            'scheduler_step_size': step_size,
+            'scheduler_gamma': gamma
         })
 
+        # W&B run
         wandb.init(
             project='cifar10-classification',
-            name=f"{run_name}_ep{epochs}_{timestamp}",
+            name=run_name,
             config={
                 'architecture': architecture,
                 'learning_rate': lr,
@@ -135,7 +169,9 @@ def run_experiment(config, architecture, lr, batch_size, momentum, weight_decay)
                 'weight_decay': weight_decay,
                 'epochs': epochs,
                 'pretrained': config['model']['pretrained'],
-                'timestamp': timestamp
+                'optimizer': optimizer_name,
+                'scheduler_step_size': step_size,
+                'scheduler_gamma': gamma
             }
         )
 
@@ -143,10 +179,12 @@ def run_experiment(config, architecture, lr, batch_size, momentum, weight_decay)
 
         for epoch in range(epochs):
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer, device
+                model, train_loader, criterion=nn.CrossEntropyLoss(),
+                optimizer=optimizer, device=device
             )
             val_loss, val_acc = validate(
-                model, val_loader, criterion, device
+                model, val_loader,
+                criterion=nn.CrossEntropyLoss(), device=device
             )
             scheduler.step()
 
@@ -173,28 +211,46 @@ def run_experiment(config, architecture, lr, batch_size, momentum, weight_decay)
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                os.makedirs(config['paths']['checkpoint_dir'], exist_ok=True)
-                checkpoint_path = os.path.join(
-                    config['paths']['checkpoint_dir'],
-                    f"{checkpoint_filename}.pt"
-                )
-                torch.save(model.state_dict(), checkpoint_path)
-                mlflow.log_metric('best_val_acc', best_val_acc)
+                torch.save(model.state_dict(), temp_checkpoint_path)
                 print(f"Saved best model: {best_val_acc:.2f}%")
 
-        mlflow.pytorch.log_model(model, artifact_path='model')
+        # Rename checkpoint with actual best val_acc
+        final_checkpoint_name = (
+            f"{architecture}_ep{epochs:03d}_"
+            f"vacc{best_val_acc:.2f}_{timestamp}.pt"
+        )
+        final_checkpoint_path = os.path.join(
+            config['paths']['checkpoint_dir'],
+            final_checkpoint_name
+        )
+        os.rename(temp_checkpoint_path, final_checkpoint_path)
+        print(f"Checkpoint saved as: {final_checkpoint_name}")
+
+        # Log final metrics and tags to MLflow
         mlflow.log_metric('final_best_val_acc', best_val_acc)
+        mlflow.log_artifact(final_checkpoint_path)
+
+        # Update MLflow run with outcome tags
+        mlflow.set_tag('best_val_acc', f"{best_val_acc:.2f}")
+        mlflow.set_tag('dataset', config['data']['dataset'])
+        mlflow.set_tag('date', timestamp)
+        mlflow.set_tag('checkpoint', final_checkpoint_name)
+
+        # Update W&B
+        wandb.log({'best_val_acc': best_val_acc})
         wandb.finish()
 
-    return best_val_acc, checkpoint_filename
+    return best_val_acc, final_checkpoint_name
 
 
 def main():
     args = parse_args()
     config = load_config(args.config)
 
+    experiment_name = f"{config['data']['dataset']}-classification"
+
     mlflow.set_tracking_uri('http://localhost:5000')
-    mlflow.set_experiment('cifar10-classification')
+    mlflow.set_experiment(experiment_name)
 
     gs = config['grid_search']
     architectures = [config['model']['architecture']]
@@ -210,16 +266,17 @@ def main():
         run_name = (f"{architecture}_lr{lr}_bs{batch_size}_"
                     f"mom{momentum}_wd{weight_decay}")
 
-        if experiment_already_done(config['paths']['checkpoint_dir'], run_name):
+        if experiment_already_done(experiment_name, run_name):
             continue
 
-        best_val_acc, checkpoint_filename = run_experiment(
+        best_val_acc, checkpoint_name = run_experiment(
             config=config,
             architecture=architecture,
             lr=lr,
             batch_size=batch_size,
             momentum=momentum,
-            weight_decay=weight_decay
+            weight_decay=weight_decay,
+            experiment_name=experiment_name
         )
         results.append({
             'architecture': architecture,
@@ -228,7 +285,7 @@ def main():
             'momentum': momentum,
             'weight_decay': weight_decay,
             'best_val_acc': best_val_acc,
-            'checkpoint': checkpoint_filename
+            'checkpoint': checkpoint_name
         })
 
     print("\n=== Grid Search Results ===")
@@ -236,7 +293,6 @@ def main():
     for r in results:
         print(f"{r['architecture']} | lr={r['lr']} | "
               f"batch={r['batch_size']} | "
-              f"mom={r['momentum']} | wd={r['weight_decay']} | "
               f"Best Val Acc: {r['best_val_acc']:.2f}% | "
               f"Checkpoint: {r['checkpoint']}")
 

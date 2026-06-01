@@ -8,6 +8,9 @@ model:
 training:
   epochs: 20
   random_seed: 42
+  optimizer: sgd
+  scheduler_step_size: 7
+  scheduler_gamma: 0.1
 
 # Grid Search
 grid_search:
