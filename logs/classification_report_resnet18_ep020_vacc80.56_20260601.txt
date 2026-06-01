@@ -1,0 +1,19 @@
+Checkpoint: resnet18_ep020_vacc80.56_20260601
+Val Loss: 0.5857 | Val Accuracy: 79.82%
+============================================================
+              precision    recall  f1-score   support
+
+    airplane       0.82      0.82      0.82       973
+  automobile       0.86      0.89      0.87      1010
+        bird       0.76      0.76      0.76      1006
+         cat       0.66      0.62      0.64       967
+        deer       0.76      0.77      0.76       963
+         dog       0.72      0.71      0.71      1024
+        frog       0.84      0.87      0.86      1025
+       horse       0.81      0.84      0.82      1035
+        ship       0.90      0.86      0.88       998
+       truck       0.85      0.84      0.84       999
+
+    accuracy                           0.80     10000
+   macro avg       0.80      0.80      0.80     10000
+weighted avg       0.80      0.80      0.80     10000
