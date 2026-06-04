@@ -52,7 +52,3 @@ augmentation:
 paths:
   checkpoint_dir: checkpoints/
   log_dir: logs/
-
-# GCP
-gcp:
-  project_id: YOUR_PROJECT_ID

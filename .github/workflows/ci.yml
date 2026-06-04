@@ -4,9 +4,23 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'src/**'
+      - 'api/**'
+      - 'docker/**'
+      - 'tests/**'
+      - 'configs/**'
+      - 'requirements*.txt'
   pull_request:
     branches:
       - main
+    paths:
+      - 'src/**'
+      - 'api/**'
+      - 'docker/**'
+      - 'tests/**'
+      - 'configs/**'
+      - 'requirements*.txt'
 
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
