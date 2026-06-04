@@ -27,6 +27,7 @@ device = None
 
 @asynccontextmanager
 @asynccontextmanager
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load model on startup, clean up on shutdown."""
     global model, device
@@ -38,10 +39,10 @@ async def lifespan(app: FastAPI):
     checkpoint_path = MODEL_CHECKPOINT
     if MODEL_CHECKPOINT.startswith("gs://"):
         print(f"Downloading checkpoint from GCS: {MODEL_CHECKPOINT}")
-        from google.cloud import storage
+        from google.cloud import storage as gcs
         bucket_name = MODEL_CHECKPOINT.replace("gs://", "").split("/")[0]
         blob_path = "/".join(MODEL_CHECKPOINT.replace("gs://", "").split("/")[1:])
-        client = storage.Client()
+        client = gcs.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
         local_path = f"/tmp/{os.path.basename(MODEL_CHECKPOINT)}"
@@ -62,7 +63,7 @@ async def lifespan(app: FastAPI):
     model.eval()
     print(f"Model loaded successfully.")
 
-    yield
+    yield 
 
     print("Shutting down inference server.")
 
