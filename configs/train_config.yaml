@@ -55,4 +55,4 @@ paths:
 
 # GCP
 gcp:
-  project_id: validation-469814
+  project_id: YOUR_PROJECT_ID
