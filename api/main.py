@@ -26,8 +26,6 @@ device = None
 
 
 @asynccontextmanager
-@asynccontextmanager
-@asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load model on startup, clean up on shutdown."""
     global model, device
