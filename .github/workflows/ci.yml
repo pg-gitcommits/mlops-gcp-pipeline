@@ -98,36 +98,36 @@ jobs:
           docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_TRAIN }}:latest
           docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_TRAIN }}:${{ github.sha }}
 
-deploy:
-    name: Deploy to GKE
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  deploy:
+      name: Deploy to GKE
+      runs-on: ubuntu-latest
+      needs: build-and-push
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      steps:
+        - name: Checkout code
+          uses: actions/checkout@v4
 
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+        - name: Authenticate to GCP
+          uses: google-github-actions/auth@v2
+          with:
+            credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
+        - name: Set up Cloud SDK
+          uses: google-github-actions/setup-gcloud@v2
 
-      - name: Install kubectl and GKE auth plugin
-        run: |
-          gcloud components install kubectl gke-gcloud-auth-plugin --quiet
+        - name: Install kubectl and GKE auth plugin
+          run: |
+            gcloud components install kubectl gke-gcloud-auth-plugin --quiet
 
-      - name: Get GKE credentials
-        run: |
-          gcloud container clusters get-credentials cifar10-cluster \
-            --zone=europe-west4-a \
-            --project=${{ env.PROJECT_ID }}
+        - name: Get GKE credentials
+          run: |
+            gcloud container clusters get-credentials cifar10-cluster \
+              --zone=europe-west4-a \
+              --project=${{ env.PROJECT_ID }}
 
-      - name: Deploy to GKE
-        run: |
-          kubectl set image deployment/cifar10-api \
-            cifar10-api=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_API }}:${{ github.sha }}
-          kubectl rollout status deployment/cifar10-api
+        - name: Deploy to GKE
+          run: |
+            kubectl set image deployment/cifar10-api \
+              cifar10-api=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_API }}:${{ github.sha }}
+            kubectl rollout status deployment/cifar10-api
