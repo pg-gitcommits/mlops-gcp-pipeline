@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cifar10-api
+  labels:
+    app: cifar10-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cifar10-api
+  template:
+    metadata:
+      labels:
+        app: cifar10-api
+    spec:
+      containers:
+        - name: cifar10-api
+          image: europe-west4-docker.pkg.dev/mlops-50050/mlops-images/cifar10-api:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MODEL_ARCHITECTURE
+              value: "resnet18"
+            - name: NUM_CLASSES
+              value: "10"
+            - name: IMAGE_SIZE
+              value: "32"
+            - name: CLASSES
+              value: "airplane,automobile,bird,cat,deer,dog,frog,horse,ship,truck"
+            - name: MODEL_CHECKPOINT
+              value: "gs://mlops-cifar10-artifacts/checkpoints/resnet18_ep020_vacc83.42_20260601.pt"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 5

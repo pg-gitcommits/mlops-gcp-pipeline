@@ -26,6 +26,7 @@ device = None
 
 
 @asynccontextmanager
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load model on startup, clean up on shutdown."""
     global model, device
@@ -33,7 +34,22 @@ async def lifespan(app: FastAPI):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    print(f"Loading model from: {MODEL_CHECKPOINT}")
+    # Download checkpoint from GCS if path starts with gs://
+    checkpoint_path = MODEL_CHECKPOINT
+    if MODEL_CHECKPOINT.startswith("gs://"):
+        print(f"Downloading checkpoint from GCS: {MODEL_CHECKPOINT}")
+        from google.cloud import storage
+        bucket_name = MODEL_CHECKPOINT.replace("gs://", "").split("/")[0]
+        blob_path = "/".join(MODEL_CHECKPOINT.replace("gs://", "").split("/")[1:])
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        local_path = f"/tmp/{os.path.basename(MODEL_CHECKPOINT)}"
+        blob.download_to_filename(local_path)
+        checkpoint_path = local_path
+        print(f"Checkpoint downloaded to: {local_path}")
+
+    print(f"Loading model from: {checkpoint_path}")
     model = build_model(
         architecture=MODEL_ARCHITECTURE,
         num_classes=NUM_CLASSES,
@@ -41,16 +57,14 @@ async def lifespan(app: FastAPI):
     ).to(device)
 
     model.load_state_dict(
-        torch.load(MODEL_CHECKPOINT, map_location=device)
+        torch.load(checkpoint_path, map_location=device, weights_only=True)
     )
     model.eval()
     print(f"Model loaded successfully.")
 
     yield
 
-    # Cleanup on shutdown
     print("Shutting down inference server.")
-
 
 app = FastAPI(
     title="CIFAR-10 Image Classifier",

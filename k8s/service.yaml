@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cifar10-api-service
+  labels:
+    app: cifar10-api
+spec:
+  type: LoadBalancer
+  selector:
+    app: cifar10-api
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
