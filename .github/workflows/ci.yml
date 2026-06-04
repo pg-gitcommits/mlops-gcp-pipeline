@@ -47,7 +47,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install pyyaml pytest
+          pip install pyyaml pytest fastapi httpx2 python-multipart pillow
 
       - name: Run tests
         run: |
