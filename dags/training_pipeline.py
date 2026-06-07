@@ -42,6 +42,7 @@ with DAG(
         env_vars={
             'GCP_PROJECT_ID': 'mlops-50050',
             'GCS_BUCKET': 'mlops-cifar10-artifacts',
+            'MLFLOW_TRACKING_URI': 'http://localhost:5000',
         },
         get_logs=True,
         is_delete_operator_pod=True,
