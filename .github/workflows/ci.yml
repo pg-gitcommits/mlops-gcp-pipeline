@@ -14,7 +14,7 @@ on:
       - '.github/workflows/**'
       - 'k8s/**'
       - 'dags/**'
-      
+      - 'monitoring/**'
   pull_request:
     branches:
       - main
@@ -28,7 +28,7 @@ on:
       - '.github/workflows/**'
       - 'k8s/**'
       - 'dags/**'
-      
+      - 'monitoring/**'
 
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
