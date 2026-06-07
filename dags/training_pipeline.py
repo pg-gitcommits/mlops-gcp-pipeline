@@ -1,13 +1,15 @@
 """
 Training Pipeline DAG
-Orchestrates CIFAR-10 model training using the existing Docker training image.
+Orchestrates CIFAR-10 model training using GKE.
 Triggered manually or by the retraining trigger DAG.
 """
 
 from airflow import DAG
-from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.utils.dates import days_ago
 from datetime import timedelta
+from airflow.providers.google.cloud.operators.kubernetes_engine import (
+    GKEStartPodOperator
+)
 
 default_args = {
     'owner': 'mlops',
@@ -21,7 +23,7 @@ IMAGE = 'europe-west4-docker.pkg.dev/mlops-50050/mlops-images/cifar10-train:late
 
 with DAG(
     dag_id='training_pipeline',
-    description='Train ResNet-18 on CIFAR-10 using Docker image',
+    description='Train ResNet-18 on CIFAR-10 using GKE',
     default_args=default_args,
     schedule=None,
     start_date=days_ago(1),
@@ -29,8 +31,11 @@ with DAG(
     tags=['training', 'cifar10', 'resnet18']
 ) as dag:
 
-    train_task = KubernetesPodOperator(
+    train_task = GKEStartPodOperator(
         task_id='train_model',
+        project_id='mlops-50050',
+        location='europe-west4-a',
+        cluster_name='cifar10-cluster',
         name='cifar10-training-pod',
         image=IMAGE,
         cmds=['python3', '-m', 'src.train', '--config', 'configs/train_config.yaml'],
@@ -40,5 +45,4 @@ with DAG(
         },
         get_logs=True,
         is_delete_operator_pod=True,
-        in_cluster=True,
     )
