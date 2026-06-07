@@ -12,6 +12,9 @@ on:
       - 'configs/**'
       - 'requirements*.txt'
       - '.github/workflows/**'
+      - 'k8s/**'
+      - 'dags/**'
+      - 'monitoring/**'
   pull_request:
     branches:
       - main
@@ -23,6 +26,9 @@ on:
       - 'configs/**'
       - 'requirements*.txt'
       - '.github/workflows/**'
+      - 'k8s/**'
+      - 'dags/**'
+      - 'monitoring/**'
 
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -122,24 +128,21 @@ jobs:
           run: |
             gcloud components install kubectl gke-gcloud-auth-plugin --quiet
 
-        - name: Get GKE credentials
-          run: |
+        - name: Deploy to GKE
+        run: |
+          if gcloud container clusters describe cifar10-cluster \
+            --zone=europe-west4-a \
+            --project=${{ env.PROJECT_ID }} > /dev/null 2>&1; then
+            echo "Cluster exists — deploying..."
             gcloud container clusters get-credentials cifar10-cluster \
               --zone=europe-west4-a \
               --project=${{ env.PROJECT_ID }}
-
-        - name: Deploy to GKE
-          run: |
-            # Check if cluster exists before deploying
-            if gcloud container clusters describe cifar10-cluster \
-              --zone=europe-west4-a \
-              --project=${{ env.PROJECT_ID }} > /dev/null 2>&1; then
-              kubectl set image deployment/cifar10-api \
-                cifar10-api=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_API }}:${{ github.sha }}
-              kubectl rollout status deployment/cifar10-api
-            else
-              echo "GKE cluster not running — skipping deployment"
-            fi
+            kubectl set image deployment/cifar10-api \
+              cifar10-api=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_API }}:${{ github.sha }}
+            kubectl rollout status deployment/cifar10-api
+          else
+            echo "GKE cluster not running — skipping deployment"
+          fi
 
   deploy-dags:
     name: Deploy DAGs to Composer
@@ -161,4 +164,4 @@ jobs:
 
       - name: Upload DAGs to Composer
         run: |
-          gsutil cp dags/*.py gs://europe-west4-cifar10-compos-6b2176ab-bucket/dags/
+          gsutil cp dags/*.py gs://${{ secrets.COMPOSER_BUCKET }}/dags/
