@@ -125,7 +125,9 @@ jobs:
 
       - name: Install kubectl and GKE auth plugin
         run: |
-          sudo apt-get install -y kubectl google-cloud-cli-gke-gcloud-auth-plugin
+          sudo apt-get update
+          sudo apt-get install -y kubectl
+          gcloud components install gke-gcloud-auth-plugin --quiet
 
       - name: Deploy to GKE
         run: |
