@@ -130,9 +130,16 @@ jobs:
 
         - name: Deploy to GKE
           run: |
-            kubectl set image deployment/cifar10-api \
-              cifar10-api=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_API }}:${{ github.sha }}
-            kubectl rollout status deployment/cifar10-api
+            # Check if cluster exists before deploying
+            if gcloud container clusters describe cifar10-cluster \
+              --zone=europe-west4-a \
+              --project=${{ env.PROJECT_ID }} > /dev/null 2>&1; then
+              kubectl set image deployment/cifar10-api \
+                cifar10-api=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_API }}:${{ github.sha }}
+              kubectl rollout status deployment/cifar10-api
+            else
+              echo "GKE cluster not running — skipping deployment"
+            fi
 
   deploy-dags:
     name: Deploy DAGs to Composer
