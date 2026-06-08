@@ -46,6 +46,7 @@ GKE Inference API (updated)
 
 ## Project Structure
 
+```
 mlops-gcp-pipeline/
 ├── src/
 │   ├── model.py              # ResNet-18 architecture
@@ -75,7 +76,7 @@ mlops-gcp-pipeline/
 └── .github/
     └── workflows/
         └── ci.yml            # CI/CD pipeline
-
+```
 
 ---
 
