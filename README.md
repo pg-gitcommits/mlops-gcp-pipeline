@@ -142,11 +142,11 @@ Two experiment tracking tools used simultaneously:
 
 **MLflow Experiment Overview:**
 
-![MLflow Experiment Overview](logs/screenshots/Experiment_Overview.png)
+![MLflow Experiment Overview](logs/Experiment_Overview.png)
 
 **W&B Run Comparison:**
 
-![W&B Run Comparison](logs/screenshots/Run_Comparison.png)
+![W&B Run Comparison](logs/Run_Comparison.png)
 
 ### MLflow vs W&B
 
