@@ -126,11 +126,11 @@ weighted avg       0.83      0.83      0.83     10000
 
 ## Phase 2 — Experiment Tracking
 
-Two experiment tracking tools used simultaneously:
+Two experiment tracking tools used simultaneously to demonstrate familiarity with both.
 
 ### MLflow
 - Self-hosted on GCP VM
-- Logs parameters, metrics, artifacts per run
+- Logs parameters, metrics, and artifacts per run
 - Model registry for checkpoint versioning
 - Tags: `best_val_acc`, `dataset`, `checkpoint`, `date`
 
@@ -140,14 +140,6 @@ Two experiment tracking tools used simultaneously:
 - Hyperparameter comparison across runs
 - GPU utilisation monitoring
 
-**MLflow Experiment Overview:**
-
-![MLflow Experiment Overview](logs/Experiment_Overview.png)
-
-**W&B Run Comparison:**
-
-![W&B Run Comparison](logs/Run_Comparison.png)
-
 ### MLflow vs W&B
 
 | | MLflow | W&B |
@@ -156,7 +148,19 @@ Two experiment tracking tools used simultaneously:
 | Real-time charts | No | Yes |
 | Model Registry | Yes | Yes |
 | Cost at scale | Free | Paid |
-| Best for | Production pipelines | Active development |
+| Best for | Production pipelines | Active experimentation |
+
+### Experiment Overview (MLflow)
+
+![Experiment Overview](logs/Experiment Overview.png)
+
+### Run Comparison (MLflow)
+
+![Run Comparison](logs/Run Comparison.png)
+
+### Training Curves (W&B)
+
+![W&B](logs/wandb screenshot.png)
 
 ---
 
