@@ -152,15 +152,15 @@ Two experiment tracking tools used simultaneously to demonstrate familiarity wit
 
 ### Experiment Overview (MLflow)
 
-![Experiment Overview](logs/Experiment Overview.png)
+![Experiment Overview](logs/Experiment_Overview.png)
 
 ### Run Comparison (MLflow)
 
-![Run Comparison](logs/Run Comparison.png)
+![Run Comparison](logs/Run_Comparison.png)
 
 ### Training Curves (W&B)
 
-![W&B](logs/wandb screenshot.png)
+![W&B](logs/wandb_screenshot.png)
 
 ---
 
