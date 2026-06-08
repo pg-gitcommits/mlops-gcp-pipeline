@@ -85,9 +85,9 @@ mlops-gcp-pipeline/
 - ResNet-18 fine-tuned on CIFAR-10 (10 classes, 60,000 images)
 - Transfer learning from ImageNet weights
 - Grid search across learning rates: `[0.01, 0.001]`
-- SGD optimiser with momentum and weight decay
+- SGD optimiser with momentum=0.9, weight_decay=0.0001
 - StepLR scheduler (step_size=7, gamma=0.1)
-- Training runs on GCP VM with NVIDIA T4 GPU
+- Training on GCP VM with NVIDIA T4 GPU
 
 ### Results
 
@@ -96,7 +96,29 @@ mlops-gcp-pipeline/
 | 1 | ResNet-18 | 0.01 | 20 | **83.42%** |
 | 2 | ResNet-18 | 0.001 | 20 | 80.56% |
 
-### Confusion Matrix — Best Model (ResNet-18, lr=0.01)
+### Classification Report — Best Model
+
+```
+Checkpoint: resnet18_ep020_vacc83.42_20260601
+Val Loss: 0.5127 | Val Accuracy: 82.71%
+
+              precision    recall  f1-score   support
+    airplane       0.82      0.86      0.84       973
+  automobile       0.90      0.88      0.89      1010
+        bird       0.82      0.77      0.80      1006
+         cat       0.68      0.65      0.67       967
+        deer       0.79      0.83      0.81       963
+         dog       0.77      0.75      0.76      1024
+        frog       0.88      0.88      0.88      1025
+       horse       0.85      0.87      0.86      1035
+        ship       0.87      0.89      0.88       998
+       truck       0.87      0.88      0.87       999
+    accuracy                           0.83     10000
+   macro avg       0.83      0.83      0.83     10000
+weighted avg       0.83      0.83      0.83     10000
+```
+
+### Confusion Matrix
 
 ![Confusion Matrix](logs/confusion_matrix_resnet18_ep020_vacc83.42_20260601.png)
 
