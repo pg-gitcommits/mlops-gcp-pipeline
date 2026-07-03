@@ -18,7 +18,8 @@ def create_test_image(size=(32, 32), format='PNG'):
 def test_health_endpoint():
     """Test /health returns correct response."""
     with patch('api.main.model', MagicMock()), \
-         patch('api.main.device', torch.device('cpu')):
+         patch('api.main.device', torch.device('cpu')), \
+         patch('api.main.MODEL_CHECKPOINT', 'test-checkpoint.pt'):
         from api.main import app
         client = TestClient(app)
         response = client.get("/health")
