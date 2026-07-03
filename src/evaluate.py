@@ -11,6 +11,13 @@ import numpy as np
 from src.model import build_model, get_device
 from src.dataset import get_dataloaders
 
+# Files in checkpoints/ that are aliases/pointers rather than individual
+# timestamped training runs — these don't follow the
+# "{architecture}_ep{...}_vacc{...}_{date}.pt" naming convention that
+# architecture inference below relies on, and are always a duplicate of
+# one of the other timestamped checkpoints anyway. Skip them here.
+NON_RUN_CHECKPOINT_FILES = {"best_model.pt"}
+
 
 def load_config(config_path='configs/train_config.yaml'):
     with open(config_path, 'r') as f:
@@ -103,7 +110,9 @@ def main():
     checkpoint_dir = config['paths']['checkpoint_dir']
     log_dir = config['paths']['log_dir']
 
-    checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
+    all_checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
+    checkpoints = [f for f in all_checkpoints if f not in NON_RUN_CHECKPOINT_FILES]
+    skipped = [f for f in all_checkpoints if f in NON_RUN_CHECKPOINT_FILES]
 
     if not checkpoints:
         print("No checkpoints found. Run training first.")
@@ -112,6 +121,8 @@ def main():
     print(f"Found {len(checkpoints)} checkpoints:")
     for cp in checkpoints:
         print(f"  {cp}")
+    if skipped:
+        print(f"Skipped (alias, not an individual run): {', '.join(skipped)}")
 
     _, val_loader = get_dataloaders(config)
     results = []

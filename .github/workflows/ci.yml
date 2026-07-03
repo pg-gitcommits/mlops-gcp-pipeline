@@ -33,7 +33,7 @@ on:
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   REGION: ${{ secrets.GCP_REGION }}
-  REPOSITORY: mlops-images
+  REPOSITORY: cifar10-images
   IMAGE_API: cifar10-api
   IMAGE_TRAIN: cifar10-train
 
@@ -53,7 +53,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install pyyaml pytest fastapi httpx2 python-multipart pillow
+          pip install -r requirements-api.txt
+          pip install pytest httpx
 
       - name: Run tests
         run: |
@@ -132,11 +133,11 @@ jobs:
       - name: Deploy to GKE
         run: |
           if gcloud container clusters describe cifar10-cluster \
-            --zone=europe-west4-a \
+            --zone=europe-central2-b \
             --project=${{ env.PROJECT_ID }} > /dev/null 2>&1; then
             echo "Cluster exists — deploying..."
             gcloud container clusters get-credentials cifar10-cluster \
-              --zone=europe-west4-a \
+              --zone=europe-central2-b \
               --project=${{ env.PROJECT_ID }}
             kubectl set image deployment/cifar10-api \
               cifar10-api=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_API }}:${{ github.sha }}
@@ -165,4 +166,8 @@ jobs:
 
       - name: Upload DAGs to Composer
         run: |
-          gsutil cp dags/*.py gs://${{ secrets.COMPOSER_BUCKET }}/dags/
+          if [ -z "${{ secrets.COMPOSER_BUCKET }}" ]; then
+            echo "COMPOSER_BUCKET not set — skipping (Composer not yet deployed)"
+          else
+            gsutil cp dags/*.py gs://${{ secrets.COMPOSER_BUCKET }}/dags/
+          fi

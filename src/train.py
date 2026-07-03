@@ -1,5 +1,5 @@
 import os
-import glob
+import json
 import yaml
 import argparse
 import torch
@@ -7,10 +7,18 @@ import torch.nn as nn
 import torch.optim as optim
 from itertools import product
 from tqdm import tqdm
-from datetime import datetime
+from datetime import datetime, timezone
 import wandb
+from dotenv import load_dotenv
 from src.model import build_model, get_device
 from src.dataset import get_dataloaders
+
+# Load variables from a local .env file into the process environment, if
+# one exists. Without this, GCS_BUCKET/GCP_PROJECT etc. defined in .env
+# are invisible to this script unless manually exported in the shell
+# first — that gap is what caused GCS promotion to be silently skipped
+# during an earlier run, despite .env having the correct values.
+load_dotenv()
 
 # MLflow is optional — fails gracefully if server unavailable
 try:
@@ -20,6 +28,23 @@ try:
 except ImportError:
     MLFLOW_AVAILABLE = False
     print("MLflow not installed — skipping MLflow tracking")
+
+# google-cloud-storage is optional at import time — promotion to GCS is
+# skipped gracefully (with a clear warning) if the library or bucket isn't
+# available, same pattern as MLflow/W&B elsewhere in this file.
+try:
+    from google.cloud import storage as gcs
+    GCS_AVAILABLE = True
+except ImportError:
+    GCS_AVAILABLE = False
+    print("google-cloud-storage not installed — skipping GCS promotion")
+
+GCP_PROJECT = os.environ.get("GCP_PROJECT")
+GCS_BUCKET = os.environ.get("GCS_BUCKET")
+
+BEST_MODEL_FILENAME = "best_model.pt"
+BEST_MODEL_META_FILENAME = "best_model.json"
+PROMOTION_HISTORY_FILENAME = "promotion_history.jsonl"
 
 
 def load_config(config_path='configs/train_config.yaml'):
@@ -54,7 +79,17 @@ def setup_mlflow(experiment_name):
 
 
 def experiment_already_done(experiment_name, run_name):
-    """Check MLflow for a completed run with these hyperparameters."""
+    """grep dotenv requirements.txt
+    Check MLflow for a completed run with these hyperparameters.
+
+    If FORCE_RETRAIN=true is set in the environment, this always returns
+    False — used by Airflow to guarantee training actually runs on every
+    trigger (e.g. for scheduled retraining on new data), bypassing the
+    skip-if-already-tried behavior that's useful for manual hyperparameter
+    sweeps but wrong for scheduled retraining.
+    """
+    if os.environ.get('FORCE_RETRAIN', 'false').lower() == 'true':
+        return False
     if not MLFLOW_AVAILABLE:
         return False
     try:
@@ -74,6 +109,215 @@ def experiment_already_done(experiment_name, run_name):
         return False
     except Exception:
         return False
+
+
+def get_gcs_bucket():
+    """
+    Return a GCS bucket handle.
+
+    Raises RuntimeError if GCP_PROJECT or GCS_BUCKET env vars are not set —
+    this is a configuration error and should fail loudly, not silently
+    skip promotion. (Network/auth failures while actually talking to GCS
+    are still caught and reported separately, below.)
+    """
+    if not GCS_AVAILABLE:
+        return None
+    if not GCP_PROJECT:
+        raise RuntimeError("GCP_PROJECT environment variable is not set.")
+    if not GCS_BUCKET:
+        raise RuntimeError("GCS_BUCKET environment variable is not set.")
+    try:
+        client = gcs.Client(project=GCP_PROJECT)
+        return client.bucket(GCS_BUCKET)
+    except Exception as e:
+        print(f"GCS not available: {e}. Continuing without GCS promotion.")
+        return None
+
+
+
+def read_local_best_meta(checkpoint_dir):
+    """
+    Read best_model.json from local disk. Returns a dict, or None if it
+    doesn't exist yet (first ever promotion) or can't be read.
+    Mirrors read_current_best_meta(), but for the local filesystem rather
+    than GCS — kept independent so local promotion works even when GCS is
+    not configured.
+    """
+    local_meta_path = os.path.join(checkpoint_dir, BEST_MODEL_META_FILENAME)
+    if not os.path.exists(local_meta_path):
+        return None
+    try:
+        with open(local_meta_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Could not read local best_model.json: {e}")
+        return None
+
+
+def append_local_promotion_history(checkpoint_dir, entry):
+    """Append one JSON line to the local promotion_history.jsonl."""
+    local_history_path = os.path.join(checkpoint_dir, PROMOTION_HISTORY_FILENAME)
+    try:
+        with open(local_history_path, 'a') as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"Warning: failed to append local promotion history: {e}")
+
+
+def promote_if_better_local(local_checkpoint_path, checkpoint_name, val_acc,
+                             run_name, checkpoint_dir):
+    """
+    Local-disk equivalent of promote_if_better(). Compares this run's
+    val_acc against checkpoints/best_model.json on local disk (not GCS,
+    and not inferred from a filename), and if better, copies this
+    checkpoint to checkpoints/best_model.pt and updates the local
+    best_model.json + promotion_history.jsonl.
+
+    Runs independently of GCS availability — this is what makes
+    best_model.pt usable for local testing even when GCS_BUCKET isn't
+    configured (e.g. running train.py directly without sourcing .env).
+    """
+    current_best = read_local_best_meta(checkpoint_dir)
+    current_best_acc = current_best['val_acc'] if current_best else -1.0
+
+    if val_acc <= current_best_acc:
+        print(
+            f"Run val_acc {val_acc:.2f}% does not beat current local best "
+            f"{current_best_acc:.2f}% — not promoting locally."
+        )
+        return
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    if current_best is not None:
+        append_local_promotion_history(checkpoint_dir, {
+            **current_best,
+            "demoted_at": timestamp
+        })
+
+    try:
+        import shutil
+        local_best_path = os.path.join(checkpoint_dir, BEST_MODEL_FILENAME)
+        shutil.copyfile(local_checkpoint_path, local_best_path)
+
+        meta = {
+            "checkpoint": checkpoint_name,
+            "run_name": run_name,
+            "val_acc": val_acc,
+            "promoted_at": timestamp
+        }
+        local_meta_path = os.path.join(checkpoint_dir, BEST_MODEL_META_FILENAME)
+        with open(local_meta_path, 'w') as f:
+            json.dump(meta, f, indent=2)
+
+        print(
+            f"Promoted new local best model: {checkpoint_name} "
+            f"(val_acc {val_acc:.2f}%, previous best {current_best_acc:.2f}%)"
+        )
+    except Exception as e:
+        print(f"Warning: failed to promote new best model locally: {e}")
+
+
+def read_current_best_meta(bucket):
+    """
+    Read best_model.json from GCS. Returns a dict, or None if it doesn't
+    exist yet (e.g. first ever promotion) or GCS is unavailable.
+    """
+    if bucket is None:
+        return None
+    try:
+        blob = bucket.blob(f"checkpoints/{BEST_MODEL_META_FILENAME}")
+        if not blob.exists():
+            return None
+        return json.loads(blob.download_as_text())
+    except Exception as e:
+        print(f"Could not read current best_model.json from GCS: {e}")
+        return None
+
+
+def append_promotion_history(bucket, entry):
+    """Append one JSON line to promotion_history.jsonl in GCS."""
+    if bucket is None:
+        return
+    try:
+        blob = bucket.blob(f"checkpoints/{PROMOTION_HISTORY_FILENAME}")
+        existing = blob.download_as_text() if blob.exists() else ""
+        updated = existing + json.dumps(entry) + "\n"
+        blob.upload_from_string(updated)
+    except Exception as e:
+        print(f"Warning: failed to append promotion history to GCS: {e}")
+
+
+def promote_if_better(local_checkpoint_path, checkpoint_name, val_acc,
+                       run_name, checkpoint_dir):
+    """
+    Compare this run's val_acc against the currently promoted best model
+    (recorded in GCS's best_model.json, not inferred from a filename).
+    If this run is better, upload it as the new best_model.pt, update
+    best_model.json, and append the outgoing model's info to the
+    promotion history log (for rollback).
+
+    Always uploads the raw timestamped checkpoint to GCS regardless of
+    whether it's promoted, so every run is durably stored.
+
+    Note: this is the GCS promotion path. Local promotion is handled
+    separately by promote_if_better_local(), called alongside this in
+    run_experiment(), so a local best_model.pt always exists regardless
+    of whether GCS is configured.
+    """
+    bucket = get_gcs_bucket()
+    if bucket is None:
+        print("Skipping GCS checkpoint upload/promotion (no bucket available).")
+        return
+
+    # Always upload the raw checkpoint for durability, promoted or not.
+    try:
+        raw_blob = bucket.blob(f"checkpoints/{checkpoint_name}")
+        raw_blob.upload_from_filename(local_checkpoint_path)
+        print(f"Uploaded checkpoint to GCS: gs://{GCS_BUCKET}/checkpoints/{checkpoint_name}")
+    except Exception as e:
+        print(f"Warning: failed to upload checkpoint to GCS: {e}")
+        return
+
+    current_best = read_current_best_meta(bucket)
+    current_best_acc = current_best['val_acc'] if current_best else -1.0
+
+    if val_acc <= current_best_acc:
+        print(
+            f"Run val_acc {val_acc:.2f}% does not beat current best "
+            f"{current_best_acc:.2f}% — not promoting."
+        )
+        return
+
+    # Promote: this run becomes the new best_model.pt
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    if current_best is not None:
+        append_promotion_history(bucket, {
+            **current_best,
+            "demoted_at": timestamp
+        })
+
+    try:
+        best_blob = bucket.blob(f"checkpoints/{BEST_MODEL_FILENAME}")
+        best_blob.upload_from_filename(local_checkpoint_path)
+
+        meta = {
+            "checkpoint": checkpoint_name,
+            "run_name": run_name,
+            "val_acc": val_acc,
+            "promoted_at": timestamp
+        }
+
+        meta_blob = bucket.blob(f"checkpoints/{BEST_MODEL_META_FILENAME}")
+        meta_blob.upload_from_string(json.dumps(meta, indent=2))
+
+        print(
+            f"Promoted new best model: {checkpoint_name} "
+            f"(val_acc {val_acc:.2f}%, previous best {current_best_acc:.2f}%)"
+        )
+    except Exception as e:
+        print(f"Warning: failed to promote new best model in GCS: {e}")
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
@@ -286,6 +530,31 @@ def run_experiment(config, architecture, lr, batch_size, momentum,
             wandb.finish()
         except Exception:
             pass
+
+    # Promote locally first — always runs, independent of GCS, so
+    # checkpoints/best_model.pt exists for local testing even when
+    # GCS_BUCKET isn't configured in the current shell.
+    promote_if_better_local(
+        local_checkpoint_path=final_checkpoint_path,
+        checkpoint_name=final_checkpoint_name,
+        val_acc=best_val_acc,
+        run_name=run_name,
+        checkpoint_dir=config['paths']['checkpoint_dir']
+    )
+
+    # Then upload this run's checkpoint to GCS, and promote it to
+    # best_model.pt there too if it beats the currently recorded best.
+    # This is the step that makes "what's currently live" a fact recorded
+    # in GCS, not a filename a human has to remember to update — works
+    # identically whether this script is run by hand or triggered by
+    # Airflow, as long as GCS_BUCKET is set in the environment.
+    promote_if_better(
+        local_checkpoint_path=final_checkpoint_path,
+        checkpoint_name=final_checkpoint_name,
+        val_acc=best_val_acc,
+        run_name=run_name,
+        checkpoint_dir=config['paths']['checkpoint_dir']
+    )
 
     return best_val_acc, final_checkpoint_name
 

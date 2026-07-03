@@ -3,18 +3,27 @@ import io
 import uuid
 import torch
 from datetime import datetime
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from contextlib import asynccontextmanager
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+from dotenv import load_dotenv
 from api.models import PredictionResponse, HealthResponse
 from api.utils import load_image_from_bytes, preprocess_image
 from src.model import build_model
 
+# Load variables from a local .env file, if one exists. Inside the Docker
+# container this is usually overridden via --env-file/-e instead, but this
+# keeps local (non-Docker) runs of the API consistent with train.py.
+load_dotenv()
+
 
 # Environment variables
-MODEL_CHECKPOINT = os.environ.get(
-    "MODEL_CHECKPOINT",
-    "checkpoints/resnet18_ep020_vacc83.42_20260601.pt"
-)
+# MODEL_CHECKPOINT has no hardcoded fallback — a stale/wrong default here
+# means silently loading the wrong model. Fail loudly instead.
+MODEL_CHECKPOINT = os.environ.get("MODEL_CHECKPOINT")
 MODEL_ARCHITECTURE = os.environ.get("MODEL_ARCHITECTURE", "resnet18")
 NUM_CLASSES = int(os.environ.get("NUM_CLASSES", "10"))
 IMAGE_SIZE = int(os.environ.get("IMAGE_SIZE", "32"))
@@ -22,21 +31,44 @@ CLASSES = os.environ.get(
     "CLASSES",
     "airplane,automobile,bird,cat,deer,dog,frog,horse,ship,truck"
 ).split(",")
-GCP_PROJECT = os.environ.get("GCP_PROJECT", "mlops-50050")
-GCS_BUCKET = os.environ.get("GCS_BUCKET", "mlops-cifar10-artifacts")
-BQ_DATASET = os.environ.get("BQ_DATASET", "mlops_predictions")
+GCP_PROJECT = os.environ.get("GCP_PROJECT", "mlops-500119")
+GCS_BUCKET = os.environ.get("GCS_BUCKET")
+BQ_DATASET = os.environ.get("BQ_DATASET")
 BQ_TABLE = os.environ.get("BQ_TABLE", "predictions")
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "v1")
+
+# Max upload size for /predict, in bytes. Default 5MB.
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))
+
+# Rate limit for /predict, e.g. "10/minute". Configurable via env var.
+PREDICT_RATE_LIMIT = os.environ.get("PREDICT_RATE_LIMIT", "10/minute")
 
 # Global variables
 model = None
 device = None
+
+limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load model on startup, clean up on shutdown."""
     global model, device
+
+    if not MODEL_CHECKPOINT:
+        raise RuntimeError(
+            "MODEL_CHECKPOINT env var is required — set it to a local "
+            "checkpoint path or a gs://bucket/path.pt GCS path."
+        )
+
+    # GCS_BUCKET / BQ_DATASET are not fatal if missing — predictions still
+    # work without them, only image/prediction logging is skipped. Warn
+    # once at startup so this is obvious, rather than discovering it later
+    # from a buried "Warning: Failed to save image to GCS" on every request.
+    if not GCS_BUCKET:
+        print("Warning: GCS_BUCKET not set — prediction images will not be saved.")
+    if not BQ_DATASET:
+        print("Warning: BQ_DATASET not set — predictions will not be logged to BigQuery.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -80,9 +112,14 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 def save_image_to_gcs(image_bytes: bytes, filename: str) -> str:
-    """Save image to GCS and return the GCS path."""
+    """Save image to GCS and return the GCS path. No-op if GCS_BUCKET unset."""
+    if not GCS_BUCKET:
+        return ""
     try:
         from google.cloud import storage as gcs
         client = gcs.Client()
@@ -98,7 +135,9 @@ def save_image_to_gcs(image_bytes: bytes, filename: str) -> str:
 
 def log_to_bigquery(predicted_class: str, confidence: float,
                     image_filename: str, image_gcs_path: str):
-    """Log prediction to BigQuery."""
+    """Log prediction to BigQuery. No-op if BQ_DATASET unset."""
+    if not BQ_DATASET:
+        return
     try:
         from google.cloud import bigquery
         client = bigquery.Client(project=GCP_PROJECT)
@@ -131,7 +170,8 @@ async def health_check():
 
 
 @app.post("/predict", response_model=PredictionResponse)
-async def predict(file: UploadFile = File(...)):
+@limiter.limit(PREDICT_RATE_LIMIT)
+async def predict(request: Request, file: UploadFile = File(...)):
     """
     Predict the class of an uploaded image.
     Accepts: JPEG, PNG image files
@@ -144,6 +184,16 @@ async def predict(file: UploadFile = File(...)):
         )
 
     image_bytes = await file.read()
+
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Image too large ({len(image_bytes)} bytes). "
+                f"Max allowed: {MAX_UPLOAD_BYTES} bytes."
+            )
+        )
+
     image = load_image_from_bytes(image_bytes)
     tensor = preprocess_image(image, image_size=IMAGE_SIZE)
     tensor = tensor.to(device)

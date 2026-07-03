@@ -28,6 +28,4 @@ wandb/
 *.ipynb
 
 # OS
-.DS_Store
-
-mlflow-artifacts/
+.DS_Storemlflow.db
