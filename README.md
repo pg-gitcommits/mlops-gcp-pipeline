@@ -16,31 +16,39 @@ GCP Artifact Registry
 GKE Inference API (FastAPI + ResNet-18)
       ↓ predictions logged
 BigQuery Prediction Logs + GCS Image Storage
-      ↓ daily drift detection (Phase 6/7 — in progress)
+      ↓ daily drift detection
 Cloud Composer Airflow
       ↓ drift detected
-Automated Retraining Pipeline
+Automated Retraining Pipeline (SSH-triggered on GPU VM)
       ↓ new model
 GKE Inference API (updated)
 ```
+
+**Note on training location:** scheduled/triggered training runs via
+Airflow SSH into a dedicated, always-on GPU VM rather than running as a
+GKE pod. This is a deliberate choice tied to a T4 GPU quota of 1 — see
+`dags/training_pipeline.py`'s docstring and the comment at the bottom of
+that file for what changes once quota allows a move to GKE with a GPU
+node pool (the more conventional production pattern for ephemeral,
+autoscaling training compute).
 
 ---
 
 ## Tech Stack
 
-| Component | Technology |
-|---|---|
-| ML Framework | PyTorch |
-| Model | ResNet-18 (pretrained, fine-tuned) |
-| Experiment Tracking | MLflow + Weights & Biases |
-| Containerisation | Docker |
-| Container Registry | GCP Artifact Registry |
-| CI/CD | GitHub Actions |
-| Model Serving | FastAPI |
-| Deployment | Google Kubernetes Engine (GKE) |
-| Prediction Logging | BigQuery + GCS |
-| Orchestration | Cloud Composer (Airflow) — in progress |
-| Cloud Platform | Google Cloud Platform |
+| Component           | Technology                             |
+| ------------------- | --------------------------------------- |
+| ML Framework        | PyTorch                                |
+| Model               | ResNet-18 (pretrained, fine-tuned)     |
+| Experiment Tracking | MLflow + Weights & Biases              |
+| Containerisation    | Docker                                 |
+| Container Registry  | GCP Artifact Registry                  |
+| CI/CD               | GitHub Actions                         |
+| Model Serving       | FastAPI                                |
+| Deployment          | Google Kubernetes Engine (GKE Autopilot) |
+| Prediction Logging  | BigQuery + GCS                         |
+| Orchestration       | Cloud Composer (Airflow)               |
+| Cloud Platform      | Google Cloud Platform                  |
 
 ---
 
@@ -50,7 +58,7 @@ GKE Inference API (updated)
 mlops-gcp-pipeline/
 ├── src/
 │   ├── model.py              # ResNet-18 architecture
-│   ├── train.py              # Training script with grid search
+│   ├── train.py              # Training script with grid search + GCS checkpoint promotion
 │   ├── evaluate.py           # Evaluation with confusion matrix
 │   └── dataset.py            # CIFAR-10 data loading
 ├── api/
@@ -61,13 +69,16 @@ mlops-gcp-pipeline/
 │   ├── Dockerfile.train      # Training container (CUDA)
 │   └── Dockerfile.api        # Inference container (CPU)
 ├── k8s/
+│   ├── configmap.yaml        # API environment configuration
 │   ├── deployment.yaml       # Kubernetes deployment
 │   └── service.yaml          # LoadBalancer service
 ├── dags/
-│   ├── training_pipeline.py  # Airflow training DAG
+│   ├── training_pipeline.py  # Airflow training DAG (SSH to GPU VM)
 │   ├── evaluation_pipeline.py
 │   ├── retraining_trigger.py
 │   └── monitoring_dag.py     # Drift detection DAG
+├── monitoring/
+│   └── drift_detector.py     # Standalone drift detection (CLI + importable by the DAG)
 ├── tests/
 │   ├── test_model.py         # Model unit tests
 │   └── test_api.py           # API unit tests
@@ -88,53 +99,45 @@ mlops-gcp-pipeline/
 - SGD optimiser with momentum=0.9, weight_decay=0.0001
 - StepLR scheduler (step_size=7, gamma=0.1)
 - Training on GCP VM with NVIDIA T4 GPU
+- Checkpoints uploaded to GCS after every run; the best-performing
+  checkpoint is promoted to a stable `best_model.pt` alias (with a JSON
+  sidecar recording which run it came from and a rollback history log),
+  so downstream consumers (the API, evaluation) never need to track a
+  specific timestamped filename
 
 ### Results
 
-| Run | Architecture | LR | Epochs | Best Val Acc |
-|---|---|---|---|---|
-| 1 | ResNet-18 | 0.01 | 20 | **83.42%** |
-| 2 | ResNet-18 | 0.001 | 20 | 80.56% |
+| Run | Architecture | LR    | Epochs | Best Val Acc |
+| --- | ------------ | ----- | ------ | ------------ |
+| 1   | ResNet-18    | 0.01  | 20     | **83.45%**   |
+| 2   | ResNet-18    | 0.001 | 20     | 80.39%       |
 
-### Classification Report — Best Model
+**Confusion matrix — best model (ResNet-18, lr=0.01, 83.45% val acc):**
 
-```
-Checkpoint: resnet18_ep020_vacc83.42_20260601
-Val Loss: 0.5127 | Val Accuracy: 82.71%
+![Confusion matrix](logs/confusion_matrix_resnet18_ep020_vacc83.45_20260629.png)
 
-              precision    recall  f1-score   support
-    airplane       0.82      0.86      0.84       973
-  automobile       0.90      0.88      0.89      1010
-        bird       0.82      0.77      0.80      1006
-         cat       0.68      0.65      0.67       967
-        deer       0.79      0.83      0.81       963
-         dog       0.77      0.75      0.76      1024
-        frog       0.88      0.88      0.88      1025
-       horse       0.85      0.87      0.86      1035
-        ship       0.87      0.89      0.88       998
-       truck       0.87      0.88      0.87       999
-    accuracy                           0.83     10000
-   macro avg       0.83      0.83      0.83     10000
-weighted avg       0.83      0.83      0.83     10000
-```
+Full classification report:
+[`logs/classification_report_resnet18_ep020_vacc83.45_20260629.txt`](logs/classification_report_resnet18_ep020_vacc83.45_20260629.txt)
 
-### Confusion Matrix
-
-![Confusion Matrix](logs/confusion_matrix_resnet18_ep020_vacc83.42_20260601.png)
+Known open issue: cat/dog classification precision is noticeably lower
+than other classes — visible in the confusion matrix above — not yet
+investigated as of this restart.
 
 ---
 
 ## Phase 2 — Experiment Tracking
 
-Two experiment tracking tools used simultaneously to demonstrate familiarity with both.
+Two experiment tracking tools used simultaneously.
 
 ### MLflow
-- Self-hosted on GCP VM
+
+- Self-hosted on the GPU VM, GCS-backed artifact storage
+  (`--default-artifact-root gs://<bucket>/mlruns`)
 - Logs parameters, metrics, and artifacts per run
-- Model registry for checkpoint versioning
 - Tags: `best_val_acc`, `dataset`, `checkpoint`, `date`
 
 ### Weights & Biases
+
 - Cloud-hosted SaaS
 - Real-time training curves during active training
 - Hyperparameter comparison across runs
@@ -142,25 +145,12 @@ Two experiment tracking tools used simultaneously to demonstrate familiarity wit
 
 ### MLflow vs W&B
 
-| | MLflow | W&B |
-|---|---|---|
-| Hosting | Self-hosted | Cloud SaaS |
-| Real-time charts | No | Yes |
-| Model Registry | Yes | Yes |
-| Cost at scale | Free | Paid |
-| Best for | Production pipelines | Active experimentation |
-
-### Experiment Overview (MLflow)
-
-![Experiment Overview](logs/Experiment_Overview.png)
-
-### Run Comparison (MLflow)
-
-![Run Comparison](logs/Run_Comparison.png)
-
-### Training Curves (W&B)
-
-![W&B](logs/wandb_screenshot.png)
+|                  | MLflow               | W&B                    |
+| ---------------- | --------------------- | ----------------------- |
+| Hosting          | Self-hosted           | Cloud SaaS              |
+| Real-time charts | No                    | Yes                     |
+| Cost at scale    | Free                  | Paid                    |
+| Best for         | Production pipelines  | Active experimentation  |
 
 ---
 
@@ -168,11 +158,11 @@ Two experiment tracking tools used simultaneously to demonstrate familiarity wit
 
 Two Docker images built and pushed to GCP Artifact Registry:
 
-**Training image** (cifar10-train) — CUDA-enabled PyTorch base image, packages src/ and configs/. Used for GPU-accelerated training.
+**Training image** (`cifar10-train`) — CUDA-enabled PyTorch base image, packages `src/` and `configs/`. Used for GPU-accelerated training.
 
-**Inference image** (cifar10-api) — CPU-only PyTorch, packages api/ and src/. Minimal dependencies for fast startup and low cost.
+**Inference image** (`cifar10-api`) — CPU-only PyTorch, packages `api/` and `src/`. Minimal dependencies for fast startup and low cost.
 
-Both images tagged with latest and the Git commit SHA for full traceability and rollback capability.
+Both images tagged with `latest` and the Git commit SHA for full traceability and rollback capability.
 
 ---
 
@@ -183,47 +173,91 @@ On every push to `main` (for relevant file changes):
 1. **Run Tests** — pytest runs all unit tests for model and API
 2. **Build Docker Images** — both training and inference images built
 3. **Push to Artifact Registry** — images tagged with `latest` and commit SHA
-4. **Deploy to GKE** — inference API updated if cluster is running
-5. **Deploy DAGs** — Airflow DAGs synced to Cloud Composer bucket
+4. **Deploy to GKE** — inference API updated if the cluster exists
+5. **Deploy DAGs** — Airflow DAGs (and the `monitoring/` package) synced to the Cloud Composer bucket if Composer is configured
 
-Path filtering ensures CI only triggers when relevant files change:
-`src/`, `api/`, `docker/`, `tests/`, `configs/`, `dags/`, `k8s/`, `monitoring/`
+Both deploy steps degrade gracefully — they check whether their target
+infrastructure exists first and skip cleanly if not, rather than failing
+the whole pipeline. A green checkmark on either step means it completed
+successfully, which includes a deliberate skip — check the step's log
+text, not just the checkmark, to see which branch actually ran.
+
+Path filtering ensures CI only triggers when relevant files change: `src/`, `api/`, `docker/`, `tests/`, `configs/`, `dags/`, `k8s/`, `monitoring/`
 
 ---
 
 ## Phase 5 — Kubernetes Deployment
 
-Inference API deployed to GKE:
+Inference API deployed to a GKE **Autopilot** cluster (chosen over Standard mode — billed per pod resource request rather than per provisioned node, which fits a single small API service without paying for idle node capacity):
 
-- **Deployment:** 1 replica, `e2-standard-2` node
+- **Deployment:** 1 replica, environment configured via a ConfigMap (`k8s/configmap.yaml`)
 - **Service:** LoadBalancer with public IP
 - **Health checks:** Liveness and readiness probes on `/health`
-- **Model loading:** Checkpoint downloaded from GCS at startup
+- **Model loading:** Checkpoint downloaded from GCS at startup (`gs://<bucket>/checkpoints/best_model.pt`)
 - **Prediction logging:** Every prediction logged to BigQuery + image saved to GCS
+- **Identity:** the pod runs under its own dedicated Google service account via Workload Identity Federation (mandatory and always-on in GKE Autopilot — pods never inherit the node's default permissions)
 
 ### API Endpoints
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/health` | GET | Health check |
-| `/predict` | POST | Upload image, get prediction |
-| `/classes` | GET | List all 10 classes |
-| `/docs` | GET | Interactive Swagger UI |
+| Endpoint   | Method | Description                  |
+| ---------- | ------ | ----------------------------- |
+| `/health`  | GET    | Health check                  |
+| `/predict` | POST   | Upload image, get prediction  |
+| `/classes` | GET    | List all 10 classes           |
+| `/docs`    | GET    | Interactive Swagger UI        |
 
 ### Prediction Logging Schema (BigQuery)
 
-| Column | Type | Description |
-|---|---|---|
-| `timestamp` | TIMESTAMP | When prediction was made |
-| `predicted_class` | STRING | Predicted CIFAR-10 class |
-| `confidence` | FLOAT | Model confidence (%) |
-| `image_filename` | STRING | UUID filename |
-| `image_gcs_path` | STRING | GCS path to uploaded image |
-| `model_version` | STRING | Model version identifier |
+| Column            | Type      | Description                 |
+| ------------------ | --------- | ---------------------------- |
+| `timestamp`        | TIMESTAMP | When prediction was made     |
+| `predicted_class`  | STRING    | Predicted CIFAR-10 class     |
+| `confidence`       | FLOAT     | Model confidence (%)         |
+| `image_filename`   | STRING    | UUID filename                 |
+| `image_gcs_path`   | STRING    | GCS path to uploaded image   |
+| `model_version`    | STRING    | Model version identifier     |
+
+---
+
+## Phase 6 — Airflow Orchestration
+
+Four DAGs deployed to Cloud Composer:
+
+- `training_pipeline` — SSH-triggers training on the dedicated GPU VM (not a GKE pod — see the architecture note above), sets `FORCE_RETRAIN=true` so scheduled/triggered runs always retrain regardless of matching hyperparameters, with pre-flight checks that the VM/GPU and MLflow are actually reachable before starting
+- `evaluation_pipeline` — same SSH pattern, runs evaluation and uploads reports to GCS
+- `retraining_trigger` — triggers training then evaluation sequentially
+- `monitoring_dag` — daily drift detection (`@daily`), triggers retraining automatically if drift is detected
+
+Both `training_pipeline` and `evaluation_pipeline` set `max_active_runs=1`
+to prevent concurrent runs from stacking on the single shared GPU.
+
+---
+
+## Phase 7 — Monitoring and Drift Detection
+
+- Prediction logs collected in BigQuery (Phase 5)
+- Drift detection compares a recent (last 24h) predicted-class
+  distribution against a baseline (first week of predictions) using a
+  Chi-squared test and Jensen-Shannon Divergence
+- Detection logic lives in `monitoring/drift_detector.py`, shared by both
+  `monitoring_dag.py` and a standalone CLI:
+  ```bash
+  python3 -m monitoring.drift_detector
+  ```
+  Prints results as JSON and writes a timestamped copy to
+  `monitoring/results/`.
+- Handles sparse-data edge cases explicitly: classes with zero
+  representation in both comparison windows are excluded from the
+  chi-squared test (avoiding a `0/0`-driven `NaN` result); if fewer than
+  2 classes have real data, returns a clear `insufficient_class_coverage`
+  reason instead of a misleading statistic.
 
 ---
 
 ## How to Run
+
+See `Runbook.md` for the complete, step-by-step setup sequence (GCP
+project setup through drift monitoring). Summary below.
 
 ### Prerequisites
 
@@ -241,28 +275,37 @@ cd mlops-gcp-pipeline
 
 ### 2. Set up environment
 
+Training environment needs the CUDA-matched torch build (see
+`requirements.txt`'s pinned `+cu121` versions):
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
 ```
 
 ### 3. Configure
 
-```bash
-# Set your GCP project ID
-export GCP_PROJECT_ID=your-project-id
-export GCS_BUCKET=your-gcs-bucket
+Create a `.env` file at the repo root (gitignored):
 ```
-
-Update `configs/train_config.yaml` with your GCP project ID.
+MODEL_CHECKPOINT=gs://<your-bucket>/checkpoints/best_model.pt
+GCP_PROJECT=<your-project-id>
+GCS_BUCKET=<your-bucket>
+BQ_DATASET=mlops_predictions
+BQ_TABLE=predictions
+MODEL_VERSION=v1
+PREDICT_RATE_LIMIT=10/minute
+MAX_UPLOAD_BYTES=5242880
+```
+Both `train.py` and `api/main.py` load this automatically via
+`python-dotenv`.
 
 ### 4. Train
 
 ```bash
 python3 -m src.train --config configs/train_config.yaml
 ```
+Set `FORCE_RETRAIN=true` to bypass the skip-if-already-tried check (used
+by Airflow for scheduled retraining).
 
 ### 5. Evaluate
 
@@ -280,64 +323,62 @@ python3 -m pytest tests/ -v
 
 ```bash
 docker build -f docker/Dockerfile.api -t cifar10-api:latest .
-docker run -p 8000:8000 \
-  -e MODEL_CHECKPOINT=checkpoints/your_checkpoint.pt \
-  -v $(pwd)/checkpoints:/app/checkpoints \
-  cifar10-api:latest
+docker run --env-file .env -p 8000:8000 cifar10-api:latest
 ```
-
 Open `http://localhost:8000/docs` to test predictions.
 
 ### 8. Deploy to GKE
 
 ```bash
-# Create cluster
-gcloud container clusters create cifar10-cluster \
-  --zone=europe-west4-a \
-  --num-nodes=1 \
-  --machine-type=e2-standard-2 \
-  --scopes=cloud-platform
+gcloud container clusters create-auto cifar10-cluster \
+  --project=<your-project-id> \
+  --region=<your-region>
 
-# Deploy
+kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 
-# Get public IP
 kubectl get service cifar10-api-service
 ```
+Requires Workload Identity setup for the pod's GCS/BigQuery access — see
+`Runbook.md` section 18.
 
 ---
 
 ## GitHub Actions Secrets Required
 
-| Secret | Description |
-|---|---|
-| `GCP_SA_KEY` | GCP service account JSON key |
-| `GCP_PROJECT_ID` | GCP project ID |
-| `GCP_REGION` | GCP region (e.g. `europe-west4`) |
-| `COMPOSER_BUCKET` | Cloud Composer GCS bucket name |
+| Secret            | Description                                         |
+| ------------------ | ----------------------------------------------------- |
+| `GCP_SA_KEY`       | GCP service account JSON key                          |
+| `GCP_PROJECT_ID`   | GCP project ID                                        |
+| `GCP_REGION`       | GCP region                                            |
+| `COMPOSER_BUCKET`  | Cloud Composer GCS bucket name (unset until Composer exists) |
 
 ---
 
-## Future Work
+## Known Open Items
 
-### Phase 6 — Airflow Orchestration (in progress)
-Airflow DAGs are written and deployed to Cloud Composer:
-- `training_pipeline` — orchestrates full training run via GKE
-- `evaluation_pipeline` — runs evaluation and uploads reports
-- `retraining_trigger` — triggers training + evaluation sequentially
-- `monitoring_dag` — daily drift detection, triggers retraining automatically
-
-Remaining: resolve MLflow connectivity from Airflow training pods (see Option B in code comments — deploy MLflow on Cloud Run).
-
-### Phase 7 — Monitoring and Drift Detection
-- Prediction logs already being collected in BigQuery (Phase 5)
-- Drift detection logic written in `monitoring_dag.py` using chi-squared test and Jensen-Shannon divergence
-- Remaining: standalone `monitoring/drift_detector.py`, end-to-end loop testing
+- **Cat/dog classification precision** is noticeably lower than other
+  classes — not yet investigated.
+- **Training runs on a dedicated GPU VM via SSH, not GKE** — a deliberate
+  choice given a T4 GPU quota of 1. See the note at the bottom of
+  `dags/training_pipeline.py` for the production-scale migration path
+  (GKE GPU node pool + MLflow moved off the VM onto a stable, independent
+  address).
+- **No API authentication** — `/predict` is currently public on the
+  LoadBalancer IP.
+- **IAM roles are broader than strictly necessary** in places (e.g.
+  `storage.objectAdmin` includes delete, when read/write would suffice).
+- **Infrastructure is not managed as code** — every GCP resource was
+  created via `gcloud`/`gsutil`/`bq` and documented in `Runbook.md`, not
+  Terraform.
+- **`train.py` doesn't clean up orphaned `temp_` checkpoint files** left
+  behind by a non-clean training interruption (dropped SSH, killed
+  process, VM restart) — `evaluate.py` skips these safely, but they
+  accumulate on disk.
 
 ---
 
 ## License
 
 MIT
-ENDOFFILE
