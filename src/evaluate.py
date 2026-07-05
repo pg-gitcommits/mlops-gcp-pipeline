@@ -16,6 +16,10 @@ from src.dataset import get_dataloaders
 # "{architecture}_ep{...}_vacc{...}_{date}.pt" naming convention that
 # architecture inference below relies on, and are always a duplicate of
 # one of the other timestamped checkpoints anyway. Skip them here.
+# Files starting with "temp_" are also skipped separately below — these
+# are in-progress checkpoints left behind by an interrupted training run
+# (killed, crashed, SSH dropped, etc.) that never got renamed to their
+# final filename; see train.py's temp_checkpoint_path.
 NON_RUN_CHECKPOINT_FILES = {"best_model.pt"}
 
 
@@ -111,8 +115,14 @@ def main():
     log_dir = config['paths']['log_dir']
 
     all_checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
-    checkpoints = [f for f in all_checkpoints if f not in NON_RUN_CHECKPOINT_FILES]
-    skipped = [f for f in all_checkpoints if f in NON_RUN_CHECKPOINT_FILES]
+    checkpoints = [
+        f for f in all_checkpoints
+        if f not in NON_RUN_CHECKPOINT_FILES and not f.startswith('temp_')
+    ]
+    skipped = [
+        f for f in all_checkpoints
+        if f in NON_RUN_CHECKPOINT_FILES or f.startswith('temp_')
+    ]
 
     if not checkpoints:
         print("No checkpoints found. Run training first.")

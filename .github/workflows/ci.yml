@@ -133,11 +133,11 @@ jobs:
       - name: Deploy to GKE
         run: |
           if gcloud container clusters describe cifar10-cluster \
-            --zone=europe-central2-b \
+            --region=${{ env.REGION }} \
             --project=${{ env.PROJECT_ID }} > /dev/null 2>&1; then
             echo "Cluster exists — deploying..."
             gcloud container clusters get-credentials cifar10-cluster \
-              --zone=europe-central2-b \
+              --region=${{ env.REGION }} \
               --project=${{ env.PROJECT_ID }}
             kubectl set image deployment/cifar10-api \
               cifar10-api=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_API }}:${{ github.sha }}
@@ -170,4 +170,5 @@ jobs:
             echo "COMPOSER_BUCKET not set — skipping (Composer not yet deployed)"
           else
             gsutil cp dags/*.py gs://${{ secrets.COMPOSER_BUCKET }}/dags/
+            gsutil cp -r monitoring gs://${{ secrets.COMPOSER_BUCKET }}/dags/
           fi

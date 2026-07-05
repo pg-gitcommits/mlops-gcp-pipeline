@@ -1,15 +1,20 @@
 """
 Evaluation Pipeline DAG
-Evaluates CIFAR-10 model using GKE.
+Evaluates the CIFAR-10 model on the dedicated GPU VM (cifar10-train-vm).
 Triggered after training_pipeline completes.
+
+Same architecture as training_pipeline.py — SSH to the always-on GPU VM
+rather than a GKE pod. See training_pipeline.py for the full rationale
+and the production-scale note on what changes at higher GPU quota.
+
+Requires the same Airflow SSH Connection as training_pipeline.py:
+'cifar10_vm_ssh'.
 """
 
 from airflow import DAG
+from airflow.providers.ssh.operators.ssh import SSHOperator
 from airflow.utils.dates import days_ago
 from datetime import timedelta
-from airflow.providers.google.cloud.operators.kubernetes_engine import (
-    GKEStartPodOperator
-)
 
 default_args = {
     'owner': 'mlops',
@@ -19,50 +24,40 @@ default_args = {
     'email_on_retry': False,
 }
 
-IMAGE = 'europe-west4-docker.pkg.dev/mlops-50050/mlops-images/cifar10-train:latest'
+SSH_CONN_ID = 'cifar10_vm_ssh'
+REPO_DIR = '~/mlops-gcp-pipeline'
+GCS_BUCKET = 'mlops-500119-cifar10-artifacts'
 
 with DAG(
     dag_id='evaluation_pipeline',
-    description='Evaluate CIFAR-10 model using GKE',
+    description='Evaluate CIFAR-10 model on the GPU VM',
     default_args=default_args,
     schedule=None,
     start_date=days_ago(1),
     catchup=False,
+    max_active_runs=1,
     tags=['evaluation', 'cifar10']
 ) as dag:
 
-    evaluate_task = GKEStartPodOperator(
+    evaluate_task = SSHOperator(
         task_id='evaluate_model',
-        project_id='mlops-50050',
-        location='europe-west4-a',
-        cluster_name='cifar10-cluster',
-        name='cifar10-evaluation-pod',
-        image=IMAGE,
-        cmds=['python3', '-m', 'src.evaluate', '--config', 'configs/train_config.yaml'],
-        env_vars={
-            'GCP_PROJECT_ID': 'mlops-50050',
-            'GCS_BUCKET': 'mlops-cifar10-artifacts',
-        },
-        get_logs=True,
-        is_delete_operator_pod=True,
+        ssh_conn_id=SSH_CONN_ID,
+        command=(
+            f'bash -c "cd {REPO_DIR} && '
+            'source venv/bin/activate && '
+            'python3 -m src.evaluate --config configs/train_config.yaml"'
+        ),
+        cmd_timeout=1800,
     )
 
-    upload_logs_task = GKEStartPodOperator(
+    upload_logs_task = SSHOperator(
         task_id='upload_logs_to_gcs',
-        project_id='mlops-50050',
-        location='europe-west4-a',
-        cluster_name='cifar10-cluster',
-        name='cifar10-upload-logs-pod',
-        image=IMAGE,
-        cmds=[
-            'python3', '-c',
-            'import subprocess; subprocess.run(["gsutil", "-m", "cp", "-r", "logs/", "gs://mlops-cifar10-artifacts/evaluation-logs/"])'
-        ],
-        env_vars={
-            'GCP_PROJECT_ID': 'mlops-50050',
-        },
-        get_logs=True,
-        is_delete_operator_pod=True,
+        ssh_conn_id=SSH_CONN_ID,
+        command=(
+            f'bash -c "cd {REPO_DIR} && '
+            f'gsutil -m cp -r logs/ gs://{GCS_BUCKET}/evaluation-logs/"'
+        ),
+        cmd_timeout=600,
     )
 
     evaluate_task >> upload_logs_task

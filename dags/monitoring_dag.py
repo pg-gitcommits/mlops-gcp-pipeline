@@ -2,6 +2,10 @@
 Monitoring DAG
 Runs daily to detect data drift in prediction logs.
 Triggers retraining automatically if drift is detected.
+
+Drift detection logic lives in monitoring/drift_detector.py, shared with
+the standalone CLI script — this DAG is a thin wrapper around it, not a
+second copy of the same logic.
 """
 
 from airflow import DAG
@@ -11,6 +15,8 @@ from airflow.operators.empty import EmptyOperator
 from airflow.utils.dates import days_ago
 from datetime import timedelta
 import logging
+
+from monitoring.drift_detector import check_prediction_volume, detect_drift
 
 logger = logging.getLogger(__name__)
 
@@ -23,104 +29,20 @@ default_args = {
 }
 
 
-def check_prediction_volume(**context):
+def check_prediction_volume_task(**context):
     """Check if enough predictions exist for drift analysis."""
-    from google.cloud import bigquery
-
-    client = bigquery.Client(project='mlops-50050')
-    query = """
-        SELECT COUNT(*) as count
-        FROM `mlops-50050.mlops_predictions.predictions`
-        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-    """
-    result = list(client.query(query).result())
-    count = result[0]['count']
-    logger.info(f"Predictions in last 24 hours: {count}")
+    count = check_prediction_volume()
     context['ti'].xcom_push(key='prediction_count', value=count)
     return count
 
 
-def detect_drift(**context):
-    """
-    Detect drift by comparing recent prediction distribution
-    against baseline distribution using Chi-squared test.
-    """
-    from google.cloud import bigquery
-    from scipy import stats
-    import numpy as np
-
-    client = bigquery.Client(project='mlops-50050')
-
-    # Get baseline distribution (first week of predictions)
-    baseline_query = """
-        SELECT predicted_class, COUNT(*) as count
-        FROM `mlops-50050.mlops_predictions.predictions`
-        WHERE timestamp >= TIMESTAMP_SUB(
-            (SELECT MIN(timestamp) FROM `mlops-50050.mlops_predictions.predictions`),
-            INTERVAL 0 DAY
-        )
-        AND timestamp <= TIMESTAMP_ADD(
-            (SELECT MIN(timestamp) FROM `mlops-50050.mlops_predictions.predictions`),
-            INTERVAL 7 DAY
-        )
-        GROUP BY predicted_class
-        ORDER BY predicted_class
-    """
-
-    # Get recent distribution (last 24 hours)
-    recent_query = """
-        SELECT predicted_class, COUNT(*) as count
-        FROM `mlops-50050.mlops_predictions.predictions`
-        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-        GROUP BY predicted_class
-        ORDER BY predicted_class
-    """
-
-    classes = [
-        'airplane', 'automobile', 'bird', 'cat', 'deer',
-        'dog', 'frog', 'horse', 'ship', 'truck'
-    ]
-
-    baseline_results = {row['predicted_class']: row['count']
-                        for row in client.query(baseline_query).result()}
-    recent_results = {row['predicted_class']: row['count']
-                      for row in client.query(recent_query).result()}
-
-    # Build distribution arrays
-    baseline = np.array([baseline_results.get(c, 0) for c in classes], dtype=float)
-    recent = np.array([recent_results.get(c, 0) for c in classes], dtype=float)
-
-    # Avoid division by zero
-    if baseline.sum() == 0 or recent.sum() == 0:
-        logger.warning("Insufficient data for drift detection")
-        context['ti'].xcom_push(key='drift_detected', value=False)
-        return False
-
-    # Normalise to proportions
-    baseline_prop = baseline / baseline.sum()
-    recent_prop = recent / recent.sum()
-
-    # Chi-squared test
-    expected = baseline_prop * recent.sum()
-    chi2, p_value = stats.chisquare(recent, f_exp=expected)
-
-    # Jensen-Shannon Divergence
-    from scipy.spatial.distance import jensenshannon
-    js_divergence = jensenshannon(baseline_prop, recent_prop)
-
-    logger.info(f"Chi-squared: {chi2:.4f}, p-value: {p_value:.4f}")
-    logger.info(f"Jensen-Shannon Divergence: {js_divergence:.4f}")
-
-    # Drift detected if p-value < 0.05 OR JS divergence > 0.1
-    drift_detected = p_value < 0.05 or js_divergence > 0.1
-
-    logger.info(f"Drift detected: {drift_detected}")
-
-    context['ti'].xcom_push(key='drift_detected', value=drift_detected)
-    context['ti'].xcom_push(key='p_value', value=float(p_value))
-    context['ti'].xcom_push(key='js_divergence', value=float(js_divergence))
-
-    return drift_detected
+def detect_drift_task(**context):
+    """Run drift detection and push results to XCom."""
+    result = detect_drift()
+    context['ti'].xcom_push(key='drift_detected', value=result['drift_detected'])
+    context['ti'].xcom_push(key='p_value', value=result['p_value'])
+    context['ti'].xcom_push(key='js_divergence', value=result['js_divergence'])
+    return result['drift_detected']
 
 
 def branch_on_drift(**context):
@@ -139,9 +61,6 @@ def branch_on_drift(**context):
 
 def log_drift_results(**context):
     """Log drift detection results to BigQuery."""
-    from google.cloud import bigquery
-    from datetime import datetime
-
     drift_detected = context['ti'].xcom_pull(
         task_ids='detect_drift', key='drift_detected'
     )
@@ -170,13 +89,13 @@ with DAG(
 
     check_volume_task = PythonOperator(
         task_id='check_prediction_volume',
-        python_callable=check_prediction_volume,
+        python_callable=check_prediction_volume_task,
         provide_context=True
     )
 
-    detect_drift_task = PythonOperator(
+    detect_drift_task_op = PythonOperator(
         task_id='detect_drift',
-        python_callable=detect_drift,
+        python_callable=detect_drift_task,
         provide_context=True
     )
 
@@ -203,6 +122,6 @@ with DAG(
         trigger_rule='none_failed_min_one_success'
     )
 
-    check_volume_task >> detect_drift_task >> branch_task
+    check_volume_task >> detect_drift_task_op >> branch_task
     branch_task >> trigger_retraining >> log_results
     branch_task >> no_drift >> log_results

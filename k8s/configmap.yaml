@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cifar10-api-config
+data:
+  MODEL_ARCHITECTURE: "resnet18"
+  NUM_CLASSES: "10"
+  IMAGE_SIZE: "32"
+  CLASSES: "airplane,automobile,bird,cat,deer,dog,frog,horse,ship,truck"
+  MODEL_CHECKPOINT: "gs://mlops-500119-cifar10-artifacts/checkpoints/best_model.pt"
+  GCP_PROJECT: "mlops-500119"
+  GCS_BUCKET: "mlops-500119-cifar10-artifacts"
+  BQ_DATASET: "mlops_predictions"
+  BQ_TABLE: "predictions"
+  MODEL_VERSION: "v1"
+  PREDICT_RATE_LIMIT: "10/minute"
+  MAX_UPLOAD_BYTES: "5242880"
